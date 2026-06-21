@@ -2,9 +2,9 @@
 
 > Turn every UPI transaction into an actionable carbon insight — no manual entry, no climate guilt, just ₹ and health.
 
-![Single File](https://img.shields.io/badge/architecture-single--file%20React-blue) ![Local First](https://img.shields.io/badge/data-100%25%20local--first-green) ![Zero Network](https://img.shields.io/badge/network-zero%20requests-brightgreen) ![WCAG AA](https://img.shields.io/badge/accessibility-WCAG%20AA-blueviolet) ![Competition](https://img.shields.io/badge/Google-Prompt%20Wars%202025-orange) ![Deployed](https://img.shields.io/badge/live-avcp--stadium.web.app-blue?logo=firebase)
+![Single File](https://img.shields.io/badge/architecture-single--file%20React-blue) ![Local First](https://img.shields.io/badge/data-100%25%20local--first-green) ![Zero Network](https://img.shields.io/badge/network-zero%20requests-brightgreen) ![WCAG AA](https://img.shields.io/badge/accessibility-WCAG%20AA-blueviolet) ![Competition](https://img.shields.io/badge/Google-Prompt%20Wars%202025-orange) ![Deployed](https://img.shields.io/badge/live-carbonsense--ai.web.app-blue?logo=firebase)
 
-**🚀 [Live Demo → avcp-stadium.web.app](https://avcp-stadium.web.app)**
+**🚀 [Live Demo → carbonsense-ai.web.app](https://carbonsense-ai.web.app)**
 
 ---
 
