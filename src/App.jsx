@@ -28,6 +28,9 @@ const HEATMAP_DAYS = 14;
 /** Number of recent transactions examined for repeat-behaviour detection. */
 const HISTORY_LOOKBACK = 5;
 
+/** Maximum number of transactions rendered in the log to prevent DOM bloat. */
+const LOG_RENDER_LIMIT = 20;
+
 /** Per-capita weekly CO₂ budget under India's 1.5°C fair-share pathway (kg). */
 const WEEKLY_BUDGET = 50;
 
@@ -193,6 +196,18 @@ const URGENCY_BADGE = {
 };
 
 /**
+ * Pre-computed quick test chips array. Computed once outside React render
+ * to avoid expensive Regex matching on every component render.
+ */
+const QUICK_TEST_CHIPS = SAMPLE_SMS.map((sms) => {
+  const merchantMatch = sms.match(/(IndianOil|BESCOM|HP\s?Gas|BPCL|Adani|Indane|HPCL|Diesel|Tata\sPower|Bharatgas|TNEB)/i);
+  const merchant = merchantMatch ? merchantMatch[0] : 'Sample';
+  const amountMatch = sms.match(/₹([\d,]+)/);
+  const amount = amountMatch ? amountMatch[0] : '';
+  return { sms, label: `${merchant} · ${amount}` };
+});
+
+/**
  * Generate 14-day heatmap seed data with today as the last entry.
  * @returns {Array<{day: string, value: number, isToday: boolean}>}
  */
@@ -218,24 +233,21 @@ const buildSeedDates = () => {
  * @param {string} smsText - Raw SMS message text
  * @returns {number|null} Extracted amount in ₹, or null if input is invalid or no amount found
  * @example extractAmount('Debited ₹1,200 at BESCOM') // → 1200
- * @example extractAmount('Your OTP is 456789')       // → null
  */
 export function extractAmount(smsText) {
   if (typeof smsText !== 'string') return null;
   const match = smsText.match(/(?:₹|Rs\.?|INR)\s?([\d,]+(?:\.\d{1,2})?)/i);
   if (!match) return null;
-  return parseFloat(match[1].replace(/,/g, ''));
+  const val = parseFloat(match[1].replace(/,/g, ''));
+  return isNaN(val) ? null : val;
 }
 
 /**
- * Classify merchant category from SMS text using substring matching against MERCHANT_KEYWORDS.
- * Diesel is checked before petrol so that "HPCL Diesel" → 'diesel', not 'petrol'.
+ * Classify merchant category from SMS text using substring matching.
  *
  * @param {string} smsText - Raw SMS message text
  * @returns {'petrol'|'diesel'|'electricity'|'lpg'|null} Detected category, or null if unrecognised
- * @example classifyMerchant('₹500 at IndianOil')     // → 'petrol'
  * @example classifyMerchant('₹1500 at HPCL Diesel')  // → 'diesel'
- * @example classifyMerchant('₹200 to Swiggy')        // → null
  */
 export function classifyMerchant(smsText) {
   if (typeof smsText !== 'string') return null;
@@ -248,16 +260,11 @@ export function classifyMerchant(smsText) {
 
 /**
  * Core footprint calculator. Converts ₹ amount + category + state into a CO₂ result object.
- * Uses state-specific fuel prices, grid factors, and emission constants.
- * Pure, stateless, deterministic — safe to call from any context.
  *
  * @param {number} amount   - Transaction amount in ₹
  * @param {string} category - One of 'petrol', 'diesel', 'electricity', 'lpg'
  * @param {string} stateKey - State code key into LOCAL_CONTEXT (e.g. 'KA', 'DL')
- * @returns {{category: string, amount: number, units: number, unitLabel: string,
- *            kgCO2: number, rupeesSaved: number, aqiImpact: string,
- *            rateUsed: number, emissionFactor: number}|null} Result object, or null on invalid input
- * @example calculateFootprint(500, 'petrol', 'KA') // → { kgCO2: 11.23, ... }
+ * @returns {object|null} Result object, or null on invalid input
  */
 export function calculateFootprint(amount, category, stateKey) {
   const state = LOCAL_CONTEXT[stateKey];
@@ -268,34 +275,34 @@ export function calculateFootprint(amount, category, stateKey) {
   if (category === 'petrol') {
     rateUsed = state.petrolPrice;
     emissionFactor = EMISSION_FACTORS.petrol;
-    units = parseFloat((amount / rateUsed).toFixed(2));
+    units = parseFloat((amount / rateUsed).toFixed(2)) || 0;
     unitLabel = 'litres';
-    kgCO2 = parseFloat((units * emissionFactor).toFixed(2));
+    kgCO2 = parseFloat((units * emissionFactor).toFixed(2)) || 0;
   } else if (category === 'diesel') {
     rateUsed = state.dieselPrice;
     emissionFactor = EMISSION_FACTORS.diesel;
-    units = parseFloat((amount / rateUsed).toFixed(2));
+    units = parseFloat((amount / rateUsed).toFixed(2)) || 0;
     unitLabel = 'litres';
-    kgCO2 = parseFloat((units * emissionFactor).toFixed(2));
+    kgCO2 = parseFloat((units * emissionFactor).toFixed(2)) || 0;
   } else if (category === 'electricity') {
     rateUsed = state.electricityRate;
     emissionFactor = state.gridEmissionFactor;
-    units = parseFloat((amount / rateUsed).toFixed(2));
+    units = parseFloat((amount / rateUsed).toFixed(2)) || 0;
     unitLabel = 'kWh';
-    kgCO2 = parseFloat((units * emissionFactor).toFixed(2));
+    kgCO2 = parseFloat((units * emissionFactor).toFixed(2)) || 0;
   } else if (category === 'lpg') {
     rateUsed = state.lpgPrice;
     emissionFactor = EMISSION_FACTORS.lpg;
     const cylinders = amount / rateUsed;
     const kgLPG = cylinders * LPG_CYLINDER_WEIGHT_KG;
-    units = parseFloat(cylinders.toFixed(2));
+    units = parseFloat(cylinders.toFixed(2)) || 0;
     unitLabel = 'cylinders';
-    kgCO2 = parseFloat((kgLPG * emissionFactor).toFixed(2));
+    kgCO2 = parseFloat((kgLPG * emissionFactor).toFixed(2)) || 0;
   } else {
     return null;
   }
 
-  const rupeesSaved = parseFloat((kgCO2 * SOCIAL_COST_PER_KG).toFixed(2));
+  const rupeesSaved = parseFloat((kgCO2 * SOCIAL_COST_PER_KG).toFixed(2)) || 0;
   const aqiImpact = kgCO2 > 6 ? 'High' : kgCO2 > 2 ? 'Medium' : 'Low';
 
   return {
@@ -304,169 +311,152 @@ export function calculateFootprint(amount, category, stateKey) {
   };
 }
 
+// ── Helpers for generateInsight to reduce cyclomatic complexity ──
+
+function getUrgencyLevel(budgetSignal, isRepeatOffender, aqiSignal, gridRisk, largeTxn) {
+  if (budgetSignal === 'CRITICAL') return 'CRITICAL';
+  if (isRepeatOffender && aqiSignal !== 'LOW') return 'HIGH';
+  if (gridRisk || largeTxn) return 'MEDIUM';
+  return 'LOW';
+}
+
+function getHeadline(urgencyLevel, budgetPct, category, rupeesSaved, recentSameCategory, gridRisk, stateData, amount, kgCO2, units, unitLabel) {
+  if (urgencyLevel === 'CRITICAL') {
+    return `Budget alert: you've used ${budgetPct.toFixed(0)}% of your weekly carbon budget — this ${category} transaction adds ₹${rupeesSaved.toFixed(0)} in hidden social costs.`;
+  }
+  if (urgencyLevel === 'HIGH') {
+    return `Pattern detected: ${recentSameCategory} of your last ${HISTORY_LOOKBACK} transactions were ${category}. Switching even once saves ₹${(rupeesSaved * recentSameCategory).toFixed(0)} cumulatively.`;
+  }
+  if (urgencyLevel === 'MEDIUM') {
+    if (gridRisk) {
+      return `${stateData.name}'s coal grid (${stateData.gridEmissionFactor} kg/kWh) makes this ₹${amount} bill emit ${kgCO2} kg CO₂ — ${((stateData.gridEmissionFactor / NATIONAL_AVG_GRID_FACTOR - 1) * 100).toFixed(0)}% more than the national average.`;
+    }
+    return `This ₹${amount} ${category} transaction generated ${kgCO2} kg CO₂ and ₹${rupeesSaved.toFixed(0)} in social costs.`;
+  }
+  return `₹${amount} → ${units} ${unitLabel} → ${kgCO2} kg CO₂ (₹${rupeesSaved.toFixed(0)} social cost). Your session footprint is on track.`;
+}
+
+function buildReasoningChain({ budgetSignal, isRepeatOffender, aqiSignal, gridRisk, largeTxn, category, recentSameCategory, stateData, amount, totalCO2, budgetPct, isFuel, threshold }) {
+  const reasoning = [];
+
+  if (budgetSignal !== 'LOW') {
+    const advice = budgetSignal === 'CRITICAL' ? 'switch to low-carbon alternatives immediately.' :
+                   budgetSignal === 'HIGH'     ? 'consider deferring non-essential trips.' :
+                                                 'you have room but should track carefully.';
+    reasoning.push(`Budget: ${totalCO2.toFixed(1)} / ${WEEKLY_BUDGET} kg used (${budgetPct.toFixed(0)}%) — ${advice}`);
+  }
+
+  if (isRepeatOffender) {
+    reasoning.push(`Repeat pattern: ${category} appears ${recentSameCategory}× in recent transactions. Habitual spend = compounding footprint.`);
+  }
+
+  if (aqiSignal !== 'LOW') {
+    const aqiAdvice = isFuel ? 'vehicular emissions are a direct PM2.5 contributor here.' :
+                      category === 'electricity' && stateData.coalHeavy ? 'coal-power demand worsens regional air quality.' :
+                      'outdoor air quality already stressed.';
+    reasoning.push(`Local AQI is ${stateData.aqiValue} (${stateData.aqiLevel}) — ${aqiAdvice}`);
+  }
+
+  if (gridRisk) {
+    const excessKg = parseFloat(((stateData.gridEmissionFactor - NATIONAL_AVG_GRID_FACTOR) * (amount / stateData.electricityRate)).toFixed(2)) || 0;
+    reasoning.push(`Grid penalty: ${stateData.name}'s coal grid adds ~${excessKg} kg extra CO₂ vs the national average for this same bill.`);
+  }
+
+  if (largeTxn) {
+    reasoning.push(`High-value transaction: ₹${amount} is above the typical ${category} spend threshold (₹${threshold}) — review if usage can be optimised.`);
+  }
+
+  if (reasoning.length === 0) {
+    reasoning.push('All signals are within normal range. Continue monitoring your weekly budget.');
+  }
+
+  return reasoning;
+}
+
+function buildActions({ category, isFuel, isRepeatOffender, aqiSignal, stateData, largeTxn, gridRisk }) {
+  const candidateActions = [];
+
+  if (isFuel) {
+    candidateActions.push({ label: 'Book BluSmart EV Cab', url: 'https://www.blusmart.in', score: isRepeatOffender ? 10 : 6 });
+    candidateActions.push({ label: 'Find Metro Route', url: 'https://www.urbanrail.net/as/in/', score: aqiSignal !== 'LOW' ? 8 : 4 });
+  } else if (category === 'electricity') {
+    if (stateData.coalHeavy) {
+      candidateActions.push({ label: 'Shop 5-Star ACs', url: 'https://www.flipkart.com/search?q=5+star+ac', score: largeTxn ? 10 : 7 });
+      candidateActions.push({ label: 'Explore Rooftop Solar', url: 'https://solarrooftop.gov.in', score: gridRisk ? 9 : 5 });
+    } else {
+      candidateActions.push({ label: 'Switch to Green Tariff', url: 'https://mnre.gov.in', score: 6 });
+      candidateActions.push({ label: '5-Star Appliances', url: 'https://www.flipkart.com/search?q=5+star+appliance', score: largeTxn ? 8 : 4 });
+    }
+  } else if (category === 'lpg') {
+    candidateActions.push({ label: 'Check PM Ujjwala Subsidy', url: 'https://www.pmuy.gov.in', score: 7 });
+    candidateActions.push({ label: 'Find Induction Cooktop', url: 'https://www.amazon.in/s?k=induction+cooktop+BEE+star', score: isRepeatOffender ? 9 : 5 });
+  }
+
+  return candidateActions.sort((a, b) => b.score - a.score).slice(0, 2);
+}
+
+function getHealthAdvisory(stateData) {
+  if (stateData.aqiValue >= AQI_THRESHOLDS.severe) {
+    return `AQI ${stateData.aqiValue} (${stateData.aqiLevel}): Limit outdoor exercise. Use N95 masks. Consider indoor air purifiers for your family.`;
+  }
+  if (stateData.aqiValue >= AQI_THRESHOLDS.high) {
+    return `AQI ${stateData.aqiValue} (${stateData.aqiLevel}): Reduce outdoor activity during peak hours (11am–4pm). Sensitive groups should stay indoors.`;
+  }
+  return null;
+}
+
 /**
- * Multi-signal context intelligence engine. Synthesises five independent signals —
- * budget pressure, repeat behaviour, AQI severity, coal-grid risk, and transaction size —
- * into a prioritised, layered insight with urgency tier, reasoning chain, scored actions,
- * and an optional health advisory.
+ * Multi-signal context intelligence engine.
+ * Synthesises five independent signals into a prioritised, layered insight.
  *
  * @param {object} result    - Output of calculateFootprint()
  * @param {object} stateData - Full LOCAL_CONTEXT entry for the user's current state
- * @param {Array}  history   - Full session history array (most recent first)
- * @param {number} totalCO2  - Running session total kg CO₂ (post-transaction)
- * @returns {{headline: string, reasoning: string[], urgencyLevel: string,
- *            actions: Array<{label: string, url: string, score: number}>,
- *            healthAdvisory: string|null}} Structured insight object
+ * @param {Array}  history   - Full session history array
+ * @param {number} totalCO2  - Running session total kg CO₂
+ * @returns {object} Structured insight object
  */
 export function generateInsight(result, stateData, history, totalCO2) {
   const { category, kgCO2, amount, units, unitLabel, rupeesSaved } = result;
 
-  // ── Signal 1: Budget pressure ──────────────────────────────────
   const budgetPct = (totalCO2 / WEEKLY_BUDGET) * 100;
-  const budgetSignal =
-    budgetPct >= BUDGET_THRESHOLDS.critical ? 'CRITICAL' :
-    budgetPct >= BUDGET_THRESHOLDS.high     ? 'HIGH' :
-    budgetPct >= BUDGET_THRESHOLDS.moderate  ? 'MODERATE' : 'LOW';
+  const budgetSignal = budgetPct >= BUDGET_THRESHOLDS.critical ? 'CRITICAL' :
+                       budgetPct >= BUDGET_THRESHOLDS.high     ? 'HIGH' :
+                       budgetPct >= BUDGET_THRESHOLDS.moderate  ? 'MODERATE' : 'LOW';
 
-  // ── Signal 2: Repeat behaviour detection ──────────────────────
-  const recentSameCategory = history
-    .slice(0, HISTORY_LOOKBACK)
-    .filter(h => h.category === category).length;
+  const recentSameCategory = history.slice(0, HISTORY_LOOKBACK).filter(h => h.category === category).length;
   const isRepeatOffender = recentSameCategory >= 2;
 
-  // ── Signal 3: AQI severity of current state ───────────────────
-  const aqiSignal =
-    stateData.aqiValue >= AQI_THRESHOLDS.severe   ? 'SEVERE' :
-    stateData.aqiValue >= AQI_THRESHOLDS.high      ? 'HIGH' :
-    stateData.aqiValue >= AQI_THRESHOLDS.moderate   ? 'MODERATE' : 'LOW';
+  const aqiSignal = stateData.aqiValue >= AQI_THRESHOLDS.severe ? 'SEVERE' :
+                    stateData.aqiValue >= AQI_THRESHOLDS.high    ? 'HIGH' :
+                    stateData.aqiValue >= AQI_THRESHOLDS.moderate ? 'MODERATE' : 'LOW';
 
-  // ── Signal 4: Economic magnitude ──────────────────────────────
   const threshold = LARGE_TXN_THRESHOLDS[category] || 1500;
   const largeTxn = amount > threshold;
-
-  // ── Signal 5: Coal-heavy grid multiplier ──────────────────────
   const gridRisk = stateData.coalHeavy && category === 'electricity';
-
-  // ── Urgency level (priority waterfall — not a weighted sum) ───
-  const urgencyLevel =
-    budgetSignal === 'CRITICAL'               ? 'CRITICAL' :
-    (isRepeatOffender && aqiSignal !== 'LOW') ? 'HIGH' :
-    (gridRisk || largeTxn)                    ? 'MEDIUM' : 'LOW';
-
-  // ── Headline: economic-first framing, one declarative sentence ──
   const isFuel = category === 'petrol' || category === 'diesel';
-  const headlines = {
-    CRITICAL: `Budget alert: you've used ${budgetPct.toFixed(0)}% of your weekly carbon budget — this ${category} transaction adds ₹${rupeesSaved.toFixed(0)} in hidden social costs.`,
-    HIGH:     `Pattern detected: ${recentSameCategory} of your last ${HISTORY_LOOKBACK} transactions were ${category}. Switching even once saves ₹${(rupeesSaved * recentSameCategory).toFixed(0)} cumulatively.`,
-    MEDIUM:   gridRisk
-                ? `${stateData.name}'s coal grid (${stateData.gridEmissionFactor} kg/kWh) makes this ₹${amount} bill emit ${kgCO2} kg CO₂ — ${((stateData.gridEmissionFactor / NATIONAL_AVG_GRID_FACTOR - 1) * 100).toFixed(0)}% more than the national average.`
-                : `This ₹${amount} ${category} transaction generated ${kgCO2} kg CO₂ and ₹${rupeesSaved.toFixed(0)} in social costs.`,
-    LOW:      `₹${amount} → ${units} ${unitLabel} → ${kgCO2} kg CO₂ (₹${rupeesSaved.toFixed(0)} social cost). Your session footprint is on track.`,
-  };
 
-  // ── Reasoning chain: show the "why" behind the urgency ────────
-  const reasoningParts = [];
+  const urgencyLevel = getUrgencyLevel(budgetSignal, isRepeatOffender, aqiSignal, gridRisk, largeTxn);
+  const headline = getHeadline(urgencyLevel, budgetPct, category, rupeesSaved, recentSameCategory, gridRisk, stateData, amount, kgCO2, units, unitLabel);
 
-  if (budgetSignal !== 'LOW') {
-    reasoningParts.push(
-      `Budget: ${totalCO2.toFixed(1)} / ${WEEKLY_BUDGET} kg used (${budgetPct.toFixed(0)}%) — ` +
-      (budgetSignal === 'CRITICAL' ? 'switch to low-carbon alternatives immediately.' :
-       budgetSignal === 'HIGH'     ? 'consider deferring non-essential trips.' :
-                                     'you have room but should track carefully.')
-    );
-  }
+  const reasoningParams = { budgetSignal, isRepeatOffender, aqiSignal, gridRisk, largeTxn, category, recentSameCategory, stateData, amount, totalCO2, budgetPct, isFuel, threshold };
+  const reasoning = buildReasoningChain(reasoningParams);
 
-  if (isRepeatOffender) {
-    reasoningParts.push(
-      `Repeat pattern: ${category} appears ${recentSameCategory}× in recent transactions. ` +
-      `Habitual spend = compounding footprint.`
-    );
-  }
+  const actionParams = { category, isFuel, isRepeatOffender, aqiSignal, stateData, largeTxn, gridRisk };
+  const actions = buildActions(actionParams);
 
-  if (aqiSignal !== 'LOW') {
-    reasoningParts.push(
-      `Local AQI is ${stateData.aqiValue} (${stateData.aqiLevel}) — ` +
-      (isFuel
-        ? 'vehicular emissions are a direct PM2.5 contributor here.'
-        : category === 'electricity' && stateData.coalHeavy
-        ? 'coal-power demand worsens regional air quality.'
-        : 'outdoor air quality already stressed.')
-    );
-  }
+  const healthAdvisory = getHealthAdvisory(stateData);
 
-  if (gridRisk) {
-    const excessKg = parseFloat(
-      ((stateData.gridEmissionFactor - NATIONAL_AVG_GRID_FACTOR) * (amount / stateData.electricityRate)).toFixed(2)
-    );
-    reasoningParts.push(
-      `Grid penalty: ${stateData.name}'s coal grid adds ~${excessKg} kg extra CO₂ vs the national average for this same bill.`
-    );
-  }
-
-  if (largeTxn) {
-    reasoningParts.push(
-      `High-value transaction: ₹${amount} is above the typical ${category} spend threshold (₹${threshold}) — review if usage can be optimised.`
-    );
-  }
-
-  if (reasoningParts.length === 0) {
-    reasoningParts.push('All signals are within normal range. Continue monitoring your weekly budget.');
-  }
-
-  // ── Contextual actions (scored at runtime, sorted, not static) ──
-  const candidateActions = [];
-
-  if (isFuel) {
-    candidateActions.push(
-      { label: 'Book BluSmart EV Cab', url: 'https://www.blusmart.in', score: isRepeatOffender ? 10 : 6 },
-      { label: 'Find Metro Route',     url: 'https://www.urbanrail.net/as/in/', score: aqiSignal !== 'LOW' ? 8 : 4 },
-    );
-  }
-  if (category === 'electricity') {
-    if (stateData.coalHeavy) {
-      candidateActions.push(
-        { label: 'Shop 5-Star ACs',       url: 'https://www.flipkart.com/search?q=5+star+ac', score: largeTxn ? 10 : 7 },
-        { label: 'Explore Rooftop Solar', url: 'https://solarrooftop.gov.in', score: gridRisk ? 9 : 5 },
-      );
-    } else {
-      candidateActions.push(
-        { label: 'Switch to Green Tariff', url: 'https://mnre.gov.in', score: 6 },
-        { label: '5-Star Appliances',      url: 'https://www.flipkart.com/search?q=5+star+appliance', score: largeTxn ? 8 : 4 },
-      );
-    }
-  }
-  if (category === 'lpg') {
-    candidateActions.push(
-      { label: 'Check PM Ujjwala Subsidy', url: 'https://www.pmuy.gov.in', score: 7 },
-      { label: 'Find Induction Cooktop',   url: 'https://www.amazon.in/s?k=induction+cooktop+BEE+star', score: isRepeatOffender ? 9 : 5 },
-    );
-  }
-
-  const actions = candidateActions
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 2);
-
-  // ── Health advisory (surfaced when AQI is concerning) ─────────
-  const healthAdvisory =
-    stateData.aqiValue >= AQI_THRESHOLDS.severe
-      ? `AQI ${stateData.aqiValue} (${stateData.aqiLevel}): Limit outdoor exercise. Use N95 masks. Consider indoor air purifiers for your family.`
-      : stateData.aqiValue >= AQI_THRESHOLDS.high
-      ? `AQI ${stateData.aqiValue} (${stateData.aqiLevel}): Reduce outdoor activity during peak hours (11am–4pm). Sensitive groups should stay indoors.`
-      : null;
-
-  return { headline: headlines[urgencyLevel], reasoning: reasoningParts, urgencyLevel, actions, healthAdvisory };
+  return { headline, reasoning, urgencyLevel, actions, healthAdvisory };
 }
 
 /**
- * End-to-end SMS → insight orchestrator. Chains extractAmount → classifyMerchant →
- * calculateFootprint → generateInsight into a single call.
+ * End-to-end SMS → insight orchestrator. Chains extraction, classification, and insight generation.
  *
  * @param {string} smsText  - Raw SMS message text
  * @param {string} stateKey - State code key into LOCAL_CONTEXT
  * @param {Array}  history  - Session history for context signals (default [])
  * @param {number} totalCO2 - Session running total kg CO₂ (default 0)
  * @returns {object|null} Combined footprint + insight result, or null if parsing fails
- * @example parseSMS('Debited ₹500 at IndianOil', 'KA') // → { kgCO2: 11.23, insight: {...} }
  */
 export function parseSMS(smsText, stateKey, history = [], totalCO2 = 0) {
   const amount = extractAmount(smsText);
@@ -484,21 +474,18 @@ export function parseSMS(smsText, stateKey, history = [], totalCO2 = 0) {
  *
  * @param {Array<{kgCO2: number}>} history - Session history array
  * @returns {number} Total kg CO₂ rounded to 2 decimal places
- * @example getTotalFootprint([{ kgCO2: 5.5 }, { kgCO2: 3.2 }]) // → 8.7
  */
 export function getTotalFootprint(history) {
   if (!Array.isArray(history) || history.length === 0) return 0;
-  return parseFloat(history.reduce((s, h) => s + h.kgCO2, 0).toFixed(2));
+  return parseFloat(history.reduce((s, h) => s + h.kgCO2, 0).toFixed(2)) || 0;
 }
 
 /**
  * Compute category breakdown with largest-remainder normalisation.
- * Guarantees percentage values sum to exactly 100 (no floating-point drift).
+ * Guarantees percentage values sum to exactly 100.
  *
  * @param {Array<{category: string, kgCO2: number}>} history - Session history array
- * @returns {Array<{category: string, kg: number, pct: number}>} Breakdown with normalised percentages
- * @example computeBreakdown([{ category: 'petrol', kgCO2: 10 }, { category: 'lpg', kgCO2: 10 }])
- *          // → [{ category: 'petrol', kg: 10, pct: 50 }, { category: 'lpg', kg: 10, pct: 50 }]
+ * @returns {Array<{category: string, kg: number, pct: number}>} Breakdown
  */
 export function computeBreakdown(history) {
   if (!Array.isArray(history) || history.length === 0) return [];
@@ -522,20 +509,9 @@ export function computeBreakdown(history) {
 
   return entries.map(([cat, val], i) => ({
     category: cat,
-    kg: parseFloat(val.toFixed(2)),
+    kg: parseFloat(val.toFixed(2)) || 0,
     pct: floored[i],
   }));
-}
-
-/**
- * Extract a human-readable label from a sample SMS for Quick Test chip display.
- * @param {string} sms - Sample SMS text
- * @returns {string} Formatted label e.g. "IndianOil · ₹500"
- */
-function chipLabel(sms) {
-  const merchant = sms.match(/(IndianOil|BESCOM|HP\s?Gas|BPCL|Adani|Indane|HPCL|Diesel|Tata\sPower|Bharatgas|TNEB)/i)?.[0] ?? 'Sample';
-  const amount = sms.match(/₹([\d,]+)/)?.[0] ?? '';
-  return `${merchant} · ${amount}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -695,18 +671,13 @@ SmsInputCard.propTypes = {
 
 // ── Quick Test Panel ────────────────────────────────────────────────────────
 const QuickTestPanel = memo(function QuickTestPanel({ onSelectSms }) {
-  const chips = useMemo(() => SAMPLE_SMS.map((sms) => ({
-    sms,
-    label: chipLabel(sms),
-  })), []);
-
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
       <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
         Quick Test
       </p>
       <div className="flex flex-wrap gap-2">
-        {chips.map((chip, i) => (
+        {QUICK_TEST_CHIPS.map((chip, i) => (
           <button
             key={i}
             onClick={() => onSelectSms(chip.sms)}
@@ -1089,7 +1060,7 @@ const TransactionLog = memo(function TransactionLog({ history, onClear }) {
 
       {history.length > 0 && (
         <ul className="space-y-2 max-h-64 overflow-y-auto" aria-label="Analysed transactions">
-          {history.map((h, i) => (
+          {history.slice(0, LOG_RENDER_LIMIT).map((h, i) => (
             <li key={i} className="flex items-center justify-between py-3 px-4 bg-slate-50 rounded-xl border border-slate-100 hover:border-slate-200 transition-colors">
               <div className="flex items-center gap-3">
                 <span className={`w-9 h-9 rounded-xl flex items-center justify-center ${CATEGORY_META[h.category].icon}`}>
@@ -1106,6 +1077,11 @@ const TransactionLog = memo(function TransactionLog({ history, onClear }) {
               </div>
             </li>
           ))}
+          {history.length > LOG_RENDER_LIMIT && (
+            <li className="text-center text-xs text-slate-400 pt-2">
+              + {history.length - LOG_RENDER_LIMIT} older transactions hidden
+            </li>
+          )}
         </ul>
       )}
     </div>
@@ -1117,8 +1093,7 @@ TransactionLog.propTypes = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// LAYER 5 — APP COMPONENT (composition only — all logic in pure functions,
-//            all UI in memoized sub-components)
+// LAYER 5 — APP COMPONENT (composition only — all logic in pure functions)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function App() {
@@ -1133,7 +1108,7 @@ function App() {
   const currentState = useMemo(() => LOCAL_CONTEXT[selectedState], [selectedState]);
   const totalFootprint = useMemo(() => getTotalFootprint(history), [history]);
   const totalRupeesSaved = useMemo(
-    () => parseFloat(history.reduce((s, h) => s + h.rupeesSaved, 0).toFixed(2)),
+    () => parseFloat(history.reduce((s, h) => s + h.rupeesSaved, 0).toFixed(2)) || 0,
     [history],
   );
   const equivalentCarKm = useMemo(
@@ -1170,7 +1145,7 @@ function App() {
       setHeatmapData((prev) =>
         prev.map((d, i) =>
           i === HEATMAP_DAYS - 1
-            ? { ...d, value: parseFloat((d.value + result.kgCO2).toFixed(2)) }
+            ? { ...d, value: parseFloat((d.value + result.kgCO2).toFixed(2)) || 0 }
             : d,
         ),
       );
@@ -1232,316 +1207,3 @@ function App() {
 }
 
 export default App;
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// JEST + REACT TESTING LIBRARY — Test Suite
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-// Run pure-function tests:   npx jest App.test.js
-// Run UI tests:              npx jest --env=jsdom App.test.js
-//
-// ─── FILE: App.test.js ─────────────────────────────────────────────────────
-//
-// import { render, screen } from '@testing-library/react';
-// import userEvent from '@testing-library/user-event';
-// import App, {
-//   extractAmount, classifyMerchant, calculateFootprint,
-//   parseSMS, getTotalFootprint, generateInsight, computeBreakdown,
-// } from './App';
-//
-// // ═══════════════════════════════════════════════════════════════════════════
-// // UNIT TESTS — Pure Functions
-// // ═══════════════════════════════════════════════════════════════════════════
-//
-// describe('extractAmount', () => {
-//   test('parses ₹ symbol',            () => expect(extractAmount('Debited ₹500 at IndianOil')).toBe(500));
-//   test('strips commas',              () => expect(extractAmount('Paid ₹1,200 to BESCOM')).toBe(1200));
-//   test('handles Rs. prefix',         () => expect(extractAmount('Rs. 850 to HP Gas')).toBe(850));
-//   test('handles decimal amounts',    () => expect(extractAmount('₹102.50 at petrol pump')).toBe(102.50));
-//   test('returns null for no amount', () => expect(extractAmount('OTP is 456789')).toBeNull());
-//   test('handles INR prefix',         () => expect(extractAmount('INR 2500 BPCL')).toBe(2500));
-//   test('returns null for null input',  () => expect(extractAmount(null)).toBeNull());
-//   test('returns null for number input', () => expect(extractAmount(12345)).toBeNull());
-// });
-//
-// describe('classifyMerchant', () => {
-//   test('IndianOil → petrol',     () => expect(classifyMerchant('₹500 at IndianOil')).toBe('petrol'));
-//   test('BESCOM → electricity',   () => expect(classifyMerchant('₹1200 to bescom')).toBe('electricity'));
-//   test('HP Gas → lpg',           () => expect(classifyMerchant('₹850 to HP Gas')).toBe('lpg'));
-//   test('Indane Gas → lpg',       () => expect(classifyMerchant('₹903 to Indane Gas')).toBe('lpg'));
-//   test('UPPCL → electricity',    () => expect(classifyMerchant('₹1100 to UPPCL')).toBe('electricity'));
-//   test('Swiggy → null',          () => expect(classifyMerchant('₹200 to Swiggy')).toBeNull());
-//   test('no merchant → null',     () => expect(classifyMerchant('Received ₹500 from Rahul')).toBeNull());
-//   test('HPCL Diesel → diesel',   () => expect(classifyMerchant('₹1500 at HPCL Diesel pump')).toBe('diesel'));
-//   test('diesel pump → diesel',   () => expect(classifyMerchant('₹800 at diesel pump')).toBe('diesel'));
-//   test('returns null for null',   () => expect(classifyMerchant(null)).toBeNull());
-// });
-//
-// describe('calculateFootprint — state-aware math', () => {
-//   test('KA petrol: ₹500 → ~4.86L × 2.31 ≈ 11.23 kg CO₂', () => {
-//     const r = calculateFootprint(500, 'petrol', 'KA');
-//     expect(r.units).toBeCloseTo(4.86, 1);
-//     expect(r.kgCO2).toBeCloseTo(11.23, 1);
-//     expect(r.unitLabel).toBe('litres');
-//   });
-//
-//   test('DL petrol is cheaper per litre → more fuel → more CO₂', () => {
-//     const dl = calculateFootprint(500, 'petrol', 'DL');
-//     const ka = calculateFootprint(500, 'petrol', 'KA');
-//     expect(dl.kgCO2).toBeGreaterThan(ka.kgCO2);
-//   });
-//
-//   test('UP electricity emits more CO₂ than KA (coal-heavy grid)', () => {
-//     const up = calculateFootprint(1200, 'electricity', 'UP');
-//     const ka = calculateFootprint(1200, 'electricity', 'KA');
-//     expect(up.kgCO2).toBeGreaterThan(ka.kgCO2);
-//   });
-//
-//   test('LPG ₹903 = 1 cylinder × 14.2 kg × 2.98 ≈ 42.32 kg CO₂', () => {
-//     const r = calculateFootprint(903, 'lpg', 'KA');
-//     expect(r.units).toBeCloseTo(1.0, 1);
-//     expect(r.kgCO2).toBeCloseTo(42.32, 1);
-//     expect(r.unitLabel).toBe('cylinders');
-//   });
-//
-//   test('rupeesSaved = kgCO2 × SOCIAL_COST_PER_KG', () => {
-//     const r = calculateFootprint(500, 'petrol', 'KA');
-//     expect(r.rupeesSaved).toBeCloseTo(r.kgCO2 * 5.5, 2);
-//   });
-//
-//   test('aqiImpact High when kgCO2 > 6', () => {
-//     const r = calculateFootprint(4000, 'petrol', 'UP');
-//     expect(r.aqiImpact).toBe('High');
-//   });
-//
-//   test('aqiImpact Medium when 2 < kgCO2 ≤ 6', () => {
-//     const r = calculateFootprint(150, 'electricity', 'DL');
-//     expect(r.aqiImpact).toBe('Medium');
-//   });
-//
-//   test('aqiImpact Low when kgCO2 ≤ 2', () => {
-//     const r = calculateFootprint(80, 'electricity', 'KA');
-//     expect(r.aqiImpact).toBe('Low');
-//   });
-//
-//   test('returns null for invalid stateKey', () => {
-//     expect(calculateFootprint(500, 'petrol', 'XX')).toBeNull();
-//   });
-//
-//   test('diesel ₹1500 in DL → uses diesel price and factor', () => {
-//     const r = calculateFootprint(1500, 'diesel', 'DL');
-//     expect(r.category).toBe('diesel');
-//     expect(r.unitLabel).toBe('litres');
-//     expect(r.emissionFactor).toBe(2.68);
-//     expect(r.kgCO2).toBeGreaterThan(0);
-//   });
-//
-//   test('TN petrol uses TN-specific price', () => {
-//     const r = calculateFootprint(500, 'petrol', 'TN');
-//     expect(r.rateUsed).toBe(100.76);
-//     expect(r.kgCO2).toBeGreaterThan(0);
-//   });
-//
-//   test('returns null for negative amount', () => {
-//     expect(calculateFootprint(-100, 'petrol', 'KA')).toBeNull();
-//   });
-// });
-//
-// describe('generateInsight — multi-signal context engine', () => {
-//   const kaState = { name: 'Karnataka', petrolPrice: 102.86, dieselPrice: 88.94, electricityRate: 6.50, gridEmissionFactor: 0.82, lpgPrice: 903, aqiLevel: 'Moderate', aqiValue: 98, coalHeavy: false };
-//   const dlState = { name: 'Delhi', petrolPrice: 94.72, dieselPrice: 87.62, electricityRate: 7.00, gridEmissionFactor: 1.12, lpgPrice: 903, aqiLevel: 'Unhealthy', aqiValue: 187, coalHeavy: true };
-//
-//   const mockFootprint = (category, kgCO2, amount = 500) => ({
-//     category, kgCO2, amount, units: 4.8, unitLabel: 'litres',
-//     rupeesSaved: kgCO2 * 5.5, aqiImpact: kgCO2 > 6 ? 'High' : 'Low',
-//     rateUsed: 102.86, emissionFactor: 2.31,
-//   });
-//
-//   test('CRITICAL urgency when budget > 90%', () => {
-//     const result = mockFootprint('petrol', 5);
-//     const insight = generateInsight(result, kaState, [], 46);
-//     expect(insight.urgencyLevel).toBe('CRITICAL');
-//     expect(insight.headline).toMatch(/Budget alert/i);
-//   });
-//
-//   test('HIGH urgency when repeat offender + bad AQI', () => {
-//     const history = Array(3).fill(mockFootprint('petrol', 3));
-//     const result  = mockFootprint('petrol', 3);
-//     const insight = generateInsight(result, dlState, history, 15);
-//     expect(insight.urgencyLevel).toBe('HIGH');
-//     expect(insight.reasoning.some(r => /pattern/i.test(r))).toBe(true);
-//   });
-//
-//   test('MEDIUM urgency for coal-heavy electricity', () => {
-//     const result  = mockFootprint('electricity', 4, 1200);
-//     const insight = generateInsight(result, dlState, [], 10);
-//     expect(insight.urgencyLevel).toBe('MEDIUM');
-//     expect(insight.reasoning.some(r => /coal/i.test(r))).toBe(true);
-//   });
-//
-//   test('LOW urgency for small clean-state transaction', () => {
-//     const result  = mockFootprint('electricity', 1, 200);
-//     const insight = generateInsight(result, kaState, [], 5);
-//     expect(insight.urgencyLevel).toBe('LOW');
-//   });
-//
-//   test('actions are priority-scored: repeat petrol → BluSmart first', () => {
-//     const history = Array(3).fill(mockFootprint('petrol', 3));
-//     const result  = mockFootprint('petrol', 3);
-//     const insight = generateInsight(result, kaState, history, 12);
-//     expect(insight.actions[0].label).toContain('BluSmart');
-//   });
-//
-//   test('coal electricity → 5-star AC is top action', () => {
-//     const result  = mockFootprint('electricity', 8, 2500);
-//     const insight = generateInsight(result, dlState, [], 8);
-//     expect(insight.actions[0].label).toMatch(/5-Star/i);
-//   });
-//
-//   test('reasoning array always has at least 1 entry', () => {
-//     const result  = mockFootprint('lpg', 1.5, 400);
-//     const insight = generateInsight(result, kaState, [], 2);
-//     expect(insight.reasoning.length).toBeGreaterThanOrEqual(1);
-//   });
-//
-//   test('parseSMS now returns insight property with healthAdvisory', () => {
-//     const result = parseSMS('Paid ₹1200 to BESCOM', 'DL', [], 0);
-//     expect(result).toHaveProperty('insight');
-//     expect(result.insight).toHaveProperty('urgencyLevel');
-//     expect(result.insight).toHaveProperty('reasoning');
-//     expect(result.insight).toHaveProperty('actions');
-//     expect(result.insight).toHaveProperty('healthAdvisory');
-//   });
-//
-//   test('healthAdvisory is non-null for high-AQI state (DL)', () => {
-//     const result = mockFootprint('petrol', 5);
-//     const insight = generateInsight(result, dlState, [], 10);
-//     expect(insight.healthAdvisory).not.toBeNull();
-//     expect(insight.healthAdvisory).toMatch(/AQI/);
-//   });
-//
-//   test('healthAdvisory is null for good-AQI state (KA)', () => {
-//     const result = mockFootprint('petrol', 5);
-//     const insight = generateInsight(result, kaState, [], 10);
-//     expect(insight.healthAdvisory).toBeNull();
-//   });
-//
-//   test('diesel transactions get fuel-type actions (BluSmart/Metro)', () => {
-//     const result = mockFootprint('diesel', 8, 1500);
-//     result.category = 'diesel';
-//     const insight = generateInsight(result, kaState, [], 8);
-//     expect(insight.actions.length).toBeGreaterThanOrEqual(1);
-//     expect(insight.actions[0].label).toMatch(/BluSmart|Metro/);
-//   });
-// });
-//
-// describe('parseSMS — integration pipeline', () => {
-//   test('petrol SMS in MH returns valid result', () => {
-//     const r = parseSMS('Paid ₹2500 to BPCL fuel station', 'MH');
-//     expect(r).not.toBeNull();
-//     expect(r.category).toBe('petrol');
-//     expect(r.kgCO2).toBeGreaterThan(0);
-//   });
-//
-//   test('electricity SMS in DL uses DL grid factor', () => {
-//     const r = parseSMS('Paid ₹1200 to BESCOM via UPI', 'DL');
-//     expect(r.emissionFactor).toBe(1.12);
-//   });
-//
-//   test('returns null for social payment', () => {
-//     expect(parseSMS('Received ₹200 from Priya via GPay', 'KA')).toBeNull();
-//   });
-//
-//   test('returns null for OTP SMS (no debit amount)', () => {
-//     expect(parseSMS('Your OTP for IndianOil is 998877', 'KA')).toBeNull();
-//   });
-//
-//   test('diesel SMS in TN returns diesel category', () => {
-//     const r = parseSMS('Paid ₹1500 to HPCL Diesel pump', 'TN');
-//     expect(r).not.toBeNull();
-//     expect(r.category).toBe('diesel');
-//     expect(r.emissionFactor).toBe(2.68);
-//   });
-// });
-//
-// describe('getTotalFootprint', () => {
-//   test('sums history correctly',    () => expect(getTotalFootprint([{ kgCO2: 5.5 }, { kgCO2: 3.2 }, { kgCO2: 1.1 }])).toBe(9.8));
-//   test('returns 0 for empty',       () => expect(getTotalFootprint([])).toBe(0));
-//   test('handles single entry',      () => expect(getTotalFootprint([{ kgCO2: 11.22 }])).toBe(11.22));
-//   test('returns 0 for null input',  () => expect(getTotalFootprint(null)).toBe(0));
-// });
-//
-// describe('computeBreakdown', () => {
-//   test('normalises to 100%', () => {
-//     const bd = computeBreakdown([
-//       { category: 'petrol', kgCO2: 10 },
-//       { category: 'lpg', kgCO2: 20 },
-//       { category: 'electricity', kgCO2: 3 },
-//     ]);
-//     const totalPct = bd.reduce((s, b) => s + b.pct, 0);
-//     expect(totalPct).toBe(100);
-//   });
-//
-//   test('returns empty for empty history', () => {
-//     expect(computeBreakdown([])).toEqual([]);
-//   });
-//
-//   test('single category = 100%', () => {
-//     const bd = computeBreakdown([{ category: 'petrol', kgCO2: 5 }]);
-//     expect(bd[0].pct).toBe(100);
-//   });
-// });
-//
-// // ═══════════════════════════════════════════════════════════════════════════
-// // COMPONENT TESTS — React Testing Library
-// // ═══════════════════════════════════════════════════════════════════════════
-//
-// describe('UI — Render and Interaction', () => {
-//   test('renders SMS input and Analyse button', () => {
-//     render(<App />);
-//     expect(screen.getByLabelText(/paste upi/i)).toBeInTheDocument();
-//     expect(screen.getByRole('button', { name: /analyse footprint/i })).toBeInTheDocument();
-//   });
-//
-//   test('renders trust badge in header', () => {
-//     render(<App />);
-//     expect(screen.getByText(/no data leaves device/i)).toBeInTheDocument();
-//   });
-//
-//   test('shows null state in Agent card before analysis', () => {
-//     render(<App />);
-//     expect(screen.getByText(/ready to analyse/i)).toBeInTheDocument();
-//   });
-//
-//   test('analyses petrol SMS and displays CO₂ result', async () => {
-//     render(<App />);
-//     const textarea = screen.getByLabelText(/paste upi/i);
-//     const button = screen.getByRole('button', { name: /analyse footprint/i });
-//     await userEvent.type(textarea, 'Debited ₹500 from A/c at IndianOil');
-//     await userEvent.click(button);
-//     expect(screen.getByText(/kg CO₂/i)).toBeInTheDocument();
-//     expect(screen.getByRole('status')).toBeInTheDocument();
-//   });
-//
-//   test('shows error state for unrecognised merchant', async () => {
-//     render(<App />);
-//     const textarea = screen.getByLabelText(/paste upi/i);
-//     const button = screen.getByRole('button', { name: /analyse footprint/i });
-//     await userEvent.type(textarea, 'Paid ₹200 to Swiggy');
-//     await userEvent.click(button);
-//     expect(screen.getByText(/not recognised/i)).toBeInTheDocument();
-//   });
-//
-//   test('clear button resets history', async () => {
-//     render(<App />);
-//     const textarea = screen.getByLabelText(/paste upi/i);
-//     const button = screen.getByRole('button', { name: /analyse footprint/i });
-//     await userEvent.type(textarea, 'Debited ₹500 at IndianOil');
-//     await userEvent.click(button);
-//     const clearBtn = screen.getByRole('button', { name: /clear/i });
-//     await userEvent.click(clearBtn);
-//     expect(screen.getByText(/no transactions/i)).toBeInTheDocument();
-//   });
-// });
-//
-// ═══════════════════════════════════════════════════════════════════════════════
